@@ -47,8 +47,18 @@ button = Pin(8, Pin.IN, Pin.PULL_UP)
 # Game state
 game_active = False
 cooldown_active = False
-cooldown_time = 5  # 5 seconds cooldown
+cooldown_duration = 5  # 5 seconds cooldown
+cooldown_start_time = 0
 
+def start_cooldown():
+    global cooldown_active, cooldown_start_time
+    cooldown_active = True
+    cooldown_start_time = utime.time()
+
+def check_cooldown():
+    global cooldown_active
+    if cooldown_active and utime.time() - cooldown_start_time >= cooldown_duration:
+        cooldown_active = False
 def connect_wifi():
     wlan = network.WLAN(network.STA_IF)
     wlan.active(True)
@@ -67,15 +77,10 @@ def start_game():
     global start_time, game_active
     game_active = True
     start_time = utime.time()
-    np[0] = (0, 255, 0) # set the first pixel to green
-    np.write()              # write data to all pixels
-    
     print("Game started")
 
 def end_game():
     global game_active
-    np[0] = (0, 0, 255) # set the first pixel to blue
-    np.write()              # write data to all pixels
     game_active = False
     print("Game ended")
 
@@ -94,12 +99,8 @@ def mqtt_callback(topic, msg):
     if topic == MQTT_TOPIC.encode():
         if msg == b"game_start":
             start_game()
-            
         elif msg == b"game_end":
             end_game()
-            
-        else:
-            pass
     elif topic == (MQTT_TOPIC + "/caught").encode():
         if game_active:
             caught_runner = msg.decode()
@@ -111,6 +112,7 @@ def mqtt_callback(topic, msg):
             caught_runners.remove(runner_to_save)
             mqtt_client.publish(MQTT_TOPIC + "/save_" + runner_to_save, "you_are_saved")
             print(f"Saving runner {runner_to_save}")
+            start_cooldown()  # Start cooldown after saving a runner
     
 # Main loop
 connect_wifi()
@@ -121,17 +123,51 @@ mqtt_client.subscribe(MQTT_TOPIC)
 mqtt_client.subscribe(MQTT_TOPIC + "/caught")
 mqtt_client.subscribe(MQTT_TOPIC + "/save")
 
+count = 1
+
 while True:
     if button.value() == 0:
         button_pressed()
         time.sleep(0.2)
-    if game_active:
+
+    check_cooldown()  # Check if cooldown has ended
+
+    if cooldown_active:
+        if (count % 10 == 0):
+            np[0] = (0, 0, 255)  # set the first pixel to blue
+            np.write()
+            count = 1
+        else:
+            np[0] = (255, 255, 255)
+            np.write()
+        print("Cooldown active")
+    elif game_active:
         current_time = utime.time()
+        if (count % 10 == 0):
+            np[0] = (0, 255, 0)
+            np.write()
+            count = 1
+        else:
+            np[0] = (255, 255, 255)
+            np.write()
+
         if current_time - start_time >= GAME_DURATION:
             end_game()
-        elif not cooldown_active:
+        if not cooldown_active:
             ble.advertise("Beacon")
-            # print("Advertising as Beacon") 
+            print("Advertising as Beacon")
+    else:
+        if (count % 10 == 0):
+            np[0] = (255, 0, 0)
+            np.write()
+            count = 1
+        else:
+            np[0] = (255, 255, 255)
+            np.write()
+        
+        print("not ready")
+
     mqtt_client.check_msg()
-    utime.sleep(0.1)
+    count += 1
+    time.sleep(0.2)
 

@@ -20,7 +20,7 @@ MQTT_TOPIC = "game/status"
 SAFE_DISTANCE = -50  # RSSI threshold for being "safe"
 CAUGHT_DISTANCE = -40  # RSSI threshold for being caught
 
-pin = Pin(15, Pin.OUT)   # set GPIO0 to output to drive NeoPixels
+pin = Pin(28, Pin.OUT)   # set GPIO0 to output to drive NeoPixels
 np = NeoPixel(pin, 1)   # create NeoPixel driver on GPIO0 for 8 pixels
 
 NAME_FLAG = 0x09
@@ -117,7 +117,7 @@ def connect_wifi():
     print('WiFi connected')
 
 def mqtt_connect():
-    client = MQTTClient("runner", MQTT_BROKER)
+    client = MQTTClient(f"runner_{RUNNER_ID}", MQTT_BROKER)
     client.connect()
     print('Connected to MQTT Broker')
     return client        
@@ -128,20 +128,14 @@ def mqtt_callback(topic, msg):
         if msg == b"game_start":
             active = True
             caught = False
-            np[0] = (0, 255, 0) # set the first pixel to green
-            np.write()              # write data to all pixels
             print("game_start")
         elif msg == b"game_end":
             active = False
-            np[0] = (255, 0, 0) # set the first pixel to red
-            np.write()              # write data to all pixels
             print("game_end")
     elif topic == (MQTT_TOPIC + "/save_" + RUNNER_ID).encode():
         if msg == b"you_are_saved":
             caught = False
             print("You have been saved!")
-            np[0] = (0, 255, 0) # set the first pixel to green
-            np.write()              # write data to all pixels
 
 # Setup
 connect_wifi()
@@ -150,12 +144,37 @@ mqtt_client.set_callback(mqtt_callback)
 mqtt_client.subscribe(MQTT_TOPIC)
 mqtt_client.subscribe(MQTT_TOPIC + "/save_" + RUNNER_ID)
 
+count = 1
+
 # Main loop
 while True:
     if active:
         ble.scan(0)
+    if active and not caught:
+        # if (count % 10 == 0):
+        #     np[0] = (0, 255, 0)  # set the first pixel to green
+        #     np.write()
+        #     count = 1
+        # else:
+        #     np[0] = (255, 255, 255)
+        #     np.write()
+        np[0] = (0, 255, 0)  # set the first pixel to green
+        np.write()
+        print("active")
+    else:
+        # if (count % 10 == 0):
+        #     np[0] = (255, 0, 0)  # set the first pixel to blue
+        #     np.write()
+        #     count = 1
+        # else:
+        #     np[0] = (255, 255, 255)
+        #     np.write()
+        np[0] = (255, 0, 0)  # set the first pixel to blue
+        np.write()
+        print("caught or inactive")
     mqtt_client.check_msg()
-    utime.sleep(0.1)
+    count += 1
+    utime.sleep(0.2)
 
 
 

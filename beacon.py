@@ -17,7 +17,7 @@ MQTT_BROKER = "test.mosquitto.org"
 MQTT_TOPIC = "game/status"
 GAME_DURATION = 300  # 5 minutes in seconds
 
-pin = Pin(16, Pin.OUT)   # set GPIO0 to output to drive NeoPixels
+pin = Pin(28, Pin.OUT)   # set GPIO0 to output to drive NeoPixels
 np = NeoPixel(pin, 1)   # create NeoPixel driver on GPIO0 for 8 pixels
 
 NAME_FLAG = 0x09
@@ -42,7 +42,7 @@ ble = Yell()
 
 # Setup
 # led = Pin(15, Pin.OUT)  # Green when active, Red when cooling down, Blue when game ends
-button = Pin(8, Pin.IN, Pin.PULL_UP)
+button = Pin(20, Pin.IN, Pin.PULL_UP)
 
 # Game state
 game_active = False
@@ -133,41 +133,46 @@ while True:
     check_cooldown()  # Check if cooldown has ended
 
     if cooldown_active:
-        if (count % 10 == 0):
-            np[0] = (0, 0, 255)  # set the first pixel to blue
-            np.write()
-            count = 1
-        else:
-            np[0] = (255, 255, 255)
-            np.write()
+#         if (count % 10 == 0):
+#             np[0] = (0, 0, 255)  # set the first pixel to blue
+#             np.write()
+#             count = 1
+#         else:
+#             np[0] = (255, 255, 255)
+#             np.write()
+        np[0] = (0, 0, 255)  # set the first pixel to blue
+        np.write()
         print("Cooldown active")
     elif game_active:
         current_time = utime.time()
-        if (count % 10 == 0):
-            np[0] = (0, 255, 0)
-            np.write()
-            count = 1
-        else:
-            np[0] = (255, 255, 255)
-            np.write()
-
+#         if (count % 10 == 0):
+#             np[0] = (0, 255, 0)
+#             np.write()
+#             count = 1
+#         else:
+#             np[0] = (255, 255, 255)
+#             np.write()
+        np[0] = (0, 255, 0)
+        np.write()
         if current_time - start_time >= GAME_DURATION:
             end_game()
         if not cooldown_active:
             ble.advertise("Beacon")
             print("Advertising as Beacon")
     else:
-        if (count % 10 == 0):
-            np[0] = (255, 0, 0)
-            np.write()
-            count = 1
-        else:
-            np[0] = (255, 255, 255)
-            np.write()
-        
+#         if (count % 10 == 0):
+#             np[0] = (255, 0, 0)
+#             np.write()
+#             count = 1
+#         else:
+#             np[0] = (255, 255, 255)
+#             np.write()
+        np[0] = (255, 0, 0)
+        np.write()
         print("not ready")
 
     mqtt_client.check_msg()
     count += 1
     time.sleep(0.2)
+
 

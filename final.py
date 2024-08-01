@@ -5,15 +5,18 @@ import time
 import struct
 import utime
 import machine
-from machine import Pin
+from machine import Pin, PWM
 from neopixel import NeoPixel
 import urandom
 import ubinascii
+from secrets import secrets
+# import pwmio
+# import simpleio
 
 # Configuration
-WIFI_SSID = "tufts_eecs"
-WIFI_PASSWORD = "foundedin1883"
-MQTT_BROKER = "test.mosquitto.org"
+WIFI_SSID = secrets['ssid']
+WIFI_PASSWORD = secrets['password']
+MQTT_BROKER = "broker.hivemq.com"
 MQTT_TOPIC = "taggame"
 DEVICE_ID = ubinascii.hexlify(machine.unique_id()).decode()
 
@@ -27,6 +30,7 @@ SCAN_DONE = 6
 # Hardware setup
 led = NeoPixel(Pin(28), 1)  # NeoPixel on GPIO 28
 button = Pin(20, Pin.IN, Pin.PULL_UP)
+PIEZO_PIN = Pin(18, Pin.OUT)
 
 # Game state
 role = None
@@ -34,6 +38,30 @@ active = False
 caught = False
 cooldown_active = False
 cooldown_start = 0
+beacon_saves = 0
+
+def tone(pin_number, frequency, duration=1):
+    """
+    Generates a square wave of the specified frequency on a pin
+    :param int pin_number: GPIO pin number on which to output the tone
+    :param float frequency: Frequency of tone in Hz
+    :param int duration: Duration of tone in seconds (optional)
+    """
+    pin = Pin(pin_number)
+    pwm = PWM(pin)
+    
+    # Set the frequency
+    pwm.freq(int(frequency))
+    
+    # Set 50% duty cycle (8388 is approximately half of 65535)
+    pwm.duty_u16(8388)
+    
+    # Play the tone for the specified duration
+    utime.sleep(duration)
+    
+    # Stop the PWM
+    pwm.deinit()
+
 
 class BLE:
     def __init__(self): 
@@ -73,19 +101,26 @@ class BLE:
         name = self.find_name(adv_data)
         if name:
             print("name: %s, rssi: %d"%(name, rssi))
-        if role == "Runner" and not caught:
-            if name and "Tagger" in name and rssi > CAUGHT_DISTANCE:
+        if role == "Runner":
+            if name and "Tagger" in name and rssi > CAUGHT_DISTANCE and not caught:
                 caught = True
-                mqtt_client.publish(MQTT_TOPIC + "/caught", DEVICE_ID)
-            elif name and "Beacon" in name and rssi > SAFE_DISTANCE and not cooldown_active:
-                mqtt_client.publish(MQTT_TOPIC + "/save", "save_runner")
-                cooldown_active = True
-                cooldown_start = time.time()
-        elif role == "Beacon" and not caught:
-            if name and "Tagger" in name and rssi > CAUGHT_DISTANCE:
+                tone(PIEZO_PIN, 262, duration=0.1)
+            elif name and "Beacon" in name and rssi > SAFE_DISTANCE and caught:
+                caught = False
+                mqtt_client.publish(MQTT_TOPIC + "/save", f"{name},{DEVICE_ID}")
+                print(f"Requesting save from beacon: {name}")
+                tone(PIEZO_PIN, 262, duration=0.1)
+        elif role == "Beacon":
+            if name and "Tagger" in name and rssi > CAUGHT_DISTANCE and not caught:
                 caught = True
-                mqtt_client.publish(MQTT_TOPIC + "/caught", DEVICE_ID)
+                tone(PIEZO_PIN, 262, duration=0.1)
+            elif name and "Beacon" in name and rssi > SAFE_DISTANCE and caught:
+                caught = False
+                mqtt_client.publish(MQTT_TOPIC + "/save", f"{name},{DEVICE_ID}")
+                print(f"Requesting save from beacon: {name}")
+                tone(PIEZO_PIN, 262, duration=0.1)
             
+    
     def scan(self, duration = 2000):
         self.scanning = True
         return self._ble.gap_scan(duration, 30000, 30000)
@@ -98,6 +133,15 @@ class BLE:
     def stop_scan(self):
         self.scanning = False
         self._ble.gap_scan(None)
+        
+    def advertise(self, name = 'Pico', interval_us=100000):
+        short = name[:8]
+        payload = struct.pack("BB", len(short) + 1, NAME_FLAG) + name[:8]  # byte length, byte type, value
+        self._ble.gap_advertise(interval_us, adv_data=payload)
+        
+    def stop_advertising(self):
+        self._ble.gap_advertise(None)
+
 
 ble = BLE()
 
@@ -110,7 +154,7 @@ def connect_wifi():
     print('WiFi connected')
 
 def mqtt_connect():
-    client = MQTTClient(DEVICE_ID, MQTT_BROKER, keepalive=60)
+    client = MQTTClient(DEVICE_ID, MQTT_BROKER, keepalive=60000)
     client.connect()
     print('Connected to MQTT Broker')
     return client
@@ -120,7 +164,7 @@ def set_led_color(r, g, b):
     led.write()
 
 def mqtt_callback(topic, msg):
-    global role, active, caught
+    global role, active, caught, cooldown_active, cooldown_start, beacon_saves
     print(f"Received message on topic {topic}: {msg}")
     if topic == (MQTT_TOPIC + "/assign").encode():
         device, assigned_role = msg.decode().split(',')
@@ -128,17 +172,27 @@ def mqtt_callback(topic, msg):
             role = assigned_role
             active = True
             caught = False
+            tone(PIEZO_PIN, 262, duration=0.1)
             
     elif topic == (MQTT_TOPIC + "/game").encode():
         if msg == b"start":
             active = True
+            beacon_saves = 0  # Reset saves count at the start of each game
+            cooldown_active = False
+            tone(PIEZO_PIN, 262, duration=0.1)
         elif msg == b"end":
             active = False
+            tone(PIEZO_PIN, 262, duration=0.1)
+            
     elif topic == (MQTT_TOPIC + "/save").encode():
-        if role == "Runner" and caught:
-            if urandom.getrandbits(1):  # 50% chance of being saved
-                caught = False
-                mqtt_client.publish(MQTT_TOPIC + "/saved", DEVICE_ID)
+        beacon_id, runner_id = msg.decode().split(',')
+        if role == "Beacon" and beacon_id == f"Player_{DEVICE_ID[:4]}" and not caught and not cooldown_active and beacon_saves < 3:
+            beacon_saves += 1
+            cooldown_active = True
+            cooldown_start = time.time()
+            print(f"Beacon saved runner {runner_id}. Total saves: {beacon_saves}")
+            tone(PIEZO_PIN, 262, duration=0.1)
+
 
 # Setup
 connect_wifi()
@@ -164,18 +218,22 @@ while True:
             set_led_color(255, 0, 0)  # Red
             ble.advertise("Tagger")
         elif role == "Beacon":
-            if cooldown_active:
-                set_led_color(0, 0, 0) # Turn Off
-                if time.time() - cooldown_start > 5: 
-                    cooldown_active = False
-            elif not caught:
-                set_led_color(255, 255, 0)  # Yellow
-                ble.advertise("Beacon")
-            else:
+            if caught:
                 set_led_color(0, 0, 255)  # Blue
+            elif cooldown_active:
+                set_led_color(0, 0, 0) # Turn Off
+                if time.time() - cooldown_start > 5:
+                    cooldown_active = False
+            elif beacon_saves >= 3:
+                set_led_color(0, 255, 0)  # Turn Back to Runner
+            else:
+                set_led_color(255, 255, 50)  # Bright white ish color
+                ble.advertise("Beacon")
+                
     else:
         ble.stop_scan()
         set_led_color(0, 0, 0)
     
     mqtt_client.check_msg()
     time.sleep(0.1)
+

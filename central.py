@@ -12,8 +12,8 @@ from adafruit_display_text import label
 import adafruit_touchscreen
 from adafruit_display_shapes.rect import Rect
 
-MQTT_BROKER = "test.mosquitto.org"
-MQTT_TOPIC = "game/status"
+MQTT_BROKER = "broker.hivemq.com"
+MQTT_TOPIC = "taggame"
 CIRCUITPY_WIFI_SSID = "tufts_eecs"
 CIRCUITPY_WIFI_PASSWORD = "foundedin1883"
 
@@ -36,14 +36,12 @@ ts = adafruit_touchscreen.Touchscreen(
     size=(320, 240))
 
 # Game state
-game_type = 0  # 0: Tag Game, 1: Other Game
-num_runners = 6
-num_taggers = 2
-num_beacons = 1
-random_roles = True
+num_runners = 1
+num_taggers = 1
+num_beacons = 0
+game_duration = 300  # 5 minutes default
 game_active = False
-
-devices = ["device1", "device2", "device3", "device4", "device5", "device6", "device7", "device8", "device9"]
+recognized_devices = set()
 
 # MQTT callbacks
 def connected(client, userdata, flags, rc):
@@ -51,9 +49,30 @@ def connected(client, userdata, flags, rc):
 
 def disconnected(client, userdata, rc):
     print("Disconnected from MQTT broker!")
+    
+def subscribe(client, userdata, topic, granted_qos):
+    # This method is called when the client subscribes to a new feed.
+    print("Subscribed to {0} with QOS level {1}".format(topic, granted_qos))
+
+def publish(client, userdata, topic, pid):
+    # This method is called when the client publishes data to a feed.
+    print("Published to {0} with PID {1}".format(topic, pid))
+
 
 def message(client, topic, message):
-    print("New message on topic {0}: {1}".format(topic, message))
+    """Method callled when a client's subscribed feed has a new
+    value.
+    :param str topic: The topic of the feed with a new value.
+    :param str message: The new value
+    """
+    print(f"New message on topic '{topic}': '{message}'")
+    if topic == MQTT_TOPIC + "/recognize":
+        device_id = message
+        recognized_devices.add(device_id)
+        print(f"Recognized device: {device_id}")
+        print(f"Total recognized devices: {len(recognized_devices)}")
+    else:
+        print(f"Unhandled topic: {topic}")
 
 # Connect to WiFi and MQTT
 print("Connecting to WiFi...")
@@ -63,20 +82,26 @@ print("Connected!")
 pool = adafruit_connection_manager.get_radio_socketpool(esp)
 ssl_context = adafruit_connection_manager.get_radio_ssl_context(esp)
 
-mqtt_client = MQTT.MQTT(
+client = MQTT.MQTT(
     broker=MQTT_BROKER,
+    port=1883,
     socket_pool=pool,
     ssl_context=ssl_context,
-    socket_timeout=1,
+    socket_timeout=0.1,  # Reduce socket timeout
     keep_alive=60
 )
 
-mqtt_client.on_connect = connected
-mqtt_client.on_disconnect = disconnected
-mqtt_client.on_message = message
+client.on_connect = connected
+client.on_disconnect = disconnected
+client.on_subscribe = subscribe
+client.on_publish = publish
+client.on_message = message
 
 print("Connecting to MQTT broker...")
-mqtt_client.connect()
+client.connect()
+client.subscribe(MQTT_TOPIC + '/recognize')
+print("subscribed")
+time.sleep(0.5)
 
 # Display functions
 def create_text_box(text, x, y, width, height, color):
@@ -94,25 +119,11 @@ def update_display(main_text, option1, option2):
     main_group.append(create_text_box(option1, 10, 70, 145, 50, 0x00FF00))
     main_group.append(create_text_box(option2, 165, 70, 145, 50, 0xFF0000))
     display.root_group = main_group
-    
-
-def select_game():
-    global game_type
-    update_display("Select Game", "Tag Game", "Other Game")
-    while True:
-        p = ts.touch_point
-        if p:
-            if p[0] > 160:  # Right side
-                game_type = 1
-            else:  # Left side
-                game_type = 0
-            time.sleep(0.5)
-            return
 
 def set_rules():
-    global num_runners, num_taggers, num_beacons, random_roles
-    rules = [num_runners, num_taggers, num_beacons, int(random_roles)]
-    rule_names = ["Runners", "Taggers", "Beacons", "Random Roles"]
+    global num_runners, num_taggers, num_beacons, game_duration
+    rules = [num_runners, num_taggers, num_beacons, game_duration // 60]
+    rule_names = ["Runners", "Taggers", "Beacons", "Duration (min)"]
     
     for i, rule in enumerate(rules):
         update_display(f"Set {rule_names[i]}", str(rule), "Confirm")
@@ -120,66 +131,111 @@ def set_rules():
             p = ts.touch_point
             if p:
                 if p[0] < 160:  # Left side
-                    if i < 3:
-                        rules[i] = (rules[i] % 7) + 1
-                    else:
-                        rules[i] = 1 - rules[i]
+                    if i < 2:  # Runners and Taggers
+                        rules[i] = (rules[i] % 8) + 1
+                    elif i == 2:  # Beacons
+                        rules[i] = (rules[i] + 1) % 9  # Allow 0 to 8 beacons
+                    else:  # Duration
+                        rules[i] = (rules[i] % 10) + 1
                     update_display(f"Set {rule_names[i]}", str(rules[i]), "Confirm")
                 else:  # Right side (Confirm)
                     time.sleep(0.5)
                     break
             time.sleep(0.1)
     
-    num_runners, num_taggers, num_beacons, random_roles = rules[0], rules[1], rules[2], bool(rules[3])
-
+    num_runners, num_taggers, num_beacons, game_duration = rules[0], rules[1], rules[2], rules[3] * 60
+    
 def start_game():
     global game_active
     game_active = True
-    roles = ["Runner"] * num_runners + ["Tagger"] * num_taggers + ["Beacon"] * num_beacons
-#     if random_roles:
-#         roles = [roles[i] for i in range(len(roles))]  # Simplified shuffle
+    roles = ["Runner"] * num_runners + ["Tagger"] * num_taggers
+    if num_beacons > 0:
+        roles += ["Beacon"] * num_beacons
+    devices = list(recognized_devices)[:len(roles)]
     for device, role in zip(devices, roles):
-        mqtt_client.publish(MQTT_TOPIC + "/assign", f"{role},start")
+        client.publish(MQTT_TOPIC + "/assign", f"{device},{role}")
         time.sleep(0.1)
+    client.publish(MQTT_TOPIC + "/game", "start")
     update_display("Game Started", "", "End Game")
 
 def end_game():
     global game_active
     game_active = False
-    for device in devices:
-        mqtt_client.publish(MQTT_TOPIC + "/assign", "None,end")
+    client.publish(MQTT_TOPIC + "/game", "end")
     update_display("Game Ended", "New Game", "")
 
-# Main game loop
+
+
 while True:
-    select_game()
+    update_display("Waiting for devices", f"Recognized: {len(recognized_devices)}", "Start Setup")
+    print(f"Current recognized devices: {recognized_devices}")
+    last_mqtt_check = time.monotonic()
+    reconnect_delay = 5  # Start with a 5 second delay between reconnection attempts
+    max_reconnect_delay = 60  # Maximum delay of 1 minute
+
+    while True:
+        p = ts.touch_point
+        if p and p[0] > 160:
+            break
+        
+        # Check MQTT messages every 100ms
+        if time.monotonic() - last_mqtt_check >= 0.1:
+            try:
+                client.loop(timeout=0.2)  # Increased timeout
+                last_mqtt_check = time.monotonic()
+                reconnect_delay = 5  # Reset delay on successful loop
+            except MQTT.MMQTTException as e:
+                print(f"MQTT Error: {e}")
+                # Attempt to reconnect
+                try:
+                    print(f"Attempting to reconnect in {reconnect_delay} seconds...")
+                    time.sleep(reconnect_delay)
+                    client.reconnect()
+                    print("Reconnected successfully")
+                    reconnect_delay = 5  # Reset delay on successful reconnection
+                except Exception as reconnect_error:
+                    print(f"Failed to reconnect: {reconnect_error}")
+                    reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)  # Exponential backoff
+        
+        time.sleep(0.1)
+        update_display("Waiting for devices", f"Recognized: {len(recognized_devices)}", "Start Setup")
+    
     set_rules()
     update_display("Ready to Start", "Start Game", "")
     
-    last_mqtt_check = time.monotonic()
+    start_time = None
     while True:
         p = ts.touch_point
         if p:
             if not game_active and p[0] < 160:  # Start Game
                 start_game()
+                start_time = time.monotonic()
             elif game_active and p[0] > 160:  # End Game
                 end_game()
                 break
         
-        # Check MQTT messages every second
-        if time.monotonic() - last_mqtt_check >= 1:
+        if game_active:
+            elapsed_time = time.monotonic() - start_time
+            if elapsed_time >= game_duration:
+                end_game()
+                break
+            update_display(f"Game in progress", f"Time left: {game_duration - int(elapsed_time)}s", "End Game")
+        
+        # Check MQTT messages every 100ms
+        if time.monotonic() - last_mqtt_check >= 0.1:
             try:
-                mqtt_client.loop(timeout=0.1)
+                client.loop(timeout=0.01)
                 last_mqtt_check = time.monotonic()
             except MQTT.MMQTTException as e:
 #                 print(f"MQTT Error: {e}")
                 # Attempt to reconnect
                 try:
-                    mqtt_client.reconnect()
+                    client.reconnect()
                 except Exception as reconnect_error:
 #                     print(f"Failed to reconnect: {reconnect_error}")
                     pass
         
-        time.sleep(0.1)
+        time.sleep(0.01)
 
     time.sleep(0.5)  # Debounce
+    recognized_devices.clear()
